@@ -98,60 +98,78 @@ Both `Net::BART` and `Net::BART::XS` share the same API:
 
 ## Performance
 
-### Net::BART::XS vs Net::Patricia vs Net::BART
+### Lookup Comparison — All Implementations (ops/sec, 100K prefixes)
 
 Benchmarked with random IPv4 prefixes, 50K lookups per run, best of 3.
+Go BART is the [reference implementation](https://github.com/gaissmai/bart) (v0.26.1).
 
-#### Lookup (longest-prefix match) — ops/sec
+```
+  Go BART (pre-parsed)  ████████████████████████████████████████████████  15,517K   0.06 µs
+  Go BART (from string) ████████████████████████                          7,899K   0.13 µs
+  Net::BART::XS         ██████                                            1,992K   0.50 µs
+  Net::Patricia          █▌                                                 477K   2.10 µs
+  Net::BART (pure Perl)  ▎                                                   98K  10.20 µs
+```
 
-| Table size | Net::Patricia (C) | Net::BART (Perl) | Net::BART::XS (C) |
-|:----------:|-------------------:|-----------------:|-------------------:|
-| 100        |            629K    |           266K   |          **2,785K** |
-| 1K         |            605K    |           154K   |          **2,663K** |
-| 10K        |            567K    |           129K   |          **2,410K** |
-| 100K       |            459K    |            96K   |          **1,929K** |
+### Full Comparison at 100K Prefixes — Latency per Operation
 
-#### All operations at 100K prefixes
+| Operation | Go (pre-parsed) | Go (strings) | Net::BART::XS | Net::Patricia | Net::BART |
+|-----------|:---------------:|:------------:|:--------------:|:-------------:|:---------:|
+| Insert    |     0.26 µs     |    0.43 µs   |   **0.78 µs**  |     3.1 µs    |  14.8 µs  |
+| Lookup    |     0.06 µs     |    0.13 µs   |   **0.50 µs**  |     2.1 µs    |  10.2 µs  |
+| Contains  |     0.008 µs    |    0.04 µs   |   **0.35 µs**  |       n/a     |   4.6 µs  |
+| Get/Exact |     0.07 µs     |    0.12 µs   |   **0.54 µs**  |     2.6 µs    |  11.0 µs  |
+| Delete    |     0.50 µs     |       —      |   **1.29 µs**  |     5.8 µs    |  29.3 µs  |
 
-| Operation | Net::Patricia | Net::BART | Net::BART::XS | XS vs Patricia |
-|-----------|:-------------:|:---------:|:--------------:|:--------------:|
-| Insert    |     298K/s    |    65K/s  |   **1,242K/s** |      4.2x      |
-| Lookup    |     459K/s    |    96K/s  |   **1,929K/s** |      4.2x      |
-| Contains  |       n/a     |   212K/s  |   **2,689K/s** |       n/a      |
-| Get/Exact |     372K/s    |    89K/s  |   **1,806K/s** |      4.9x      |
-| Delete    |     164K/s    |    31K/s  |     **748K/s** |      4.6x      |
+### Lookup Scaling Across Table Sizes (ops/sec)
 
-#### Per-operation latency at 100K prefixes
+| Table size | Go (pre-parsed) | Go (strings) | Net::BART::XS | Net::Patricia | Net::BART |
+|:----------:|:---------------:|:------------:|:--------------:|:-------------:|:---------:|
+| 100        |       25,653K   |     21,759K  |      3,186K    |         719K  |      310K |
+| 1K         |       50,257K   |     18,348K  |      3,047K    |         687K  |      179K |
+| 10K        |       50,972K   |      6,388K  |      2,818K    |         660K  |      149K |
+| 100K       |       15,517K   |      7,899K  |      1,992K    |         477K  |       98K |
 
-| Operation | Net::Patricia | Net::BART | Net::BART::XS |
-|-----------|:-------------:|:---------:|:--------------:|
-| Insert    |     3.4 µs    |  15.5 µs  |   **0.81 µs**  |
-| Lookup    |     2.2 µs    |  10.5 µs  |   **0.52 µs**  |
-| Contains  |       n/a     |   4.7 µs  |   **0.37 µs**  |
-| Get/Exact |     2.7 µs    |  11.3 µs  |   **0.55 µs**  |
-| Delete    |     6.1 µs    |  32.6 µs  |   **1.34 µs**  |
+### Perl-Only Comparison at 100K Prefixes
 
-All three implementations produce **identical results** on 10,000 random lookups against 5,000 random prefixes.
+| Operation | Net::Patricia (C) | Net::BART (Perl) | Net::BART::XS (C) | XS vs Patricia |
+|-----------|-------------------:|-----------------:|-------------------:|:--------------:|
+| Insert    |         318K ops/s |        68K ops/s |      **1,274K**/s  |      4.0x      |
+| Lookup    |         477K ops/s |        98K ops/s |      **1,992K**/s  |      4.2x      |
+| Contains  |                n/a |       218K ops/s |      **2,878K**/s  |       n/a      |
+| Get/Exact |         388K ops/s |        91K ops/s |      **1,865K**/s  |      4.8x      |
+| Delete    |         173K ops/s |        34K ops/s |        **777K**/s  |      4.5x      |
 
-See [PERFORMANCE.md](PERFORMANCE.md) for detailed analysis.
+All Perl implementations produce **identical results** (cross-checked with 10K random lookups).
 
-### Why Net::BART::XS Is Faster Than Net::Patricia
+See [PERFORMANCE.md](PERFORMANCE.md) for the complete analysis.
+
+### Why Is Go Faster Than C/XS?
+
+The Go BART implementation is **4-8x faster** than Net::BART::XS for lookup, despite both using the same algorithm in compiled languages. The gap comes from:
+
+- **Zero-cost value types.** Go's `netip.Addr` is a stack-allocated value with no heap allocation, while Perl XS must wrap every value in a heap-allocated SV with reference counting.
+- **Generics.** `bart.Table[int]` is monomorphized at compile time — no `void*` casts or type dispatch at runtime.
+- **No refcount overhead.** Go's garbage collector handles memory in bulk; Perl requires per-operation `SvREFCNT_inc`/`SvREFCNT_dec`.
+- **`Contains` at 8ns/op** in Go is essentially a few cache hits — the entire hot path stays in registers with zero allocation.
+
+### Why Is Net::BART::XS Faster Than Net::Patricia?
 
 - **8-bit stride multibit trie** — IPv4 traverses at most 4 nodes vs up to 32 in a patricia trie
 - **O(1) LPM per node** — precomputed ancestor bitsets + bitwise AND, not pointer-chasing
 - **Hardware intrinsics** — `POPCNT` and `LZCNT` instructions for rank/bit-find in single cycles
 - **Cache-friendly** — popcount-compressed sparse arrays pack data tightly
 
-### Choosing Between the Three
+### Choosing an Implementation
 
-| | Net::Patricia | Net::BART | Net::BART::XS |
-|-|:---:|:---:|:---:|
-| **Speed** | Fast | Moderate | Fastest |
-| **Dependencies** | C compiler + libpatricia | None | C compiler |
-| **IPv6** | Separate trie object | Native, same API | Native, same API |
-| **Values** | Integers (closures for complex) | Any Perl scalar | Any Perl scalar |
-| **walk()** | Callback | Yes | Not yet |
-| **Best for** | Existing codebases | Portability | Maximum throughput |
+| | Go BART | Net::BART::XS | Net::Patricia | Net::BART |
+|-|:---:|:---:|:---:|:---:|
+| **Language** | Go | C (Perl XS) | C (Perl XS) | Pure Perl |
+| **Lookup (100K)** | 0.06-0.13 µs | 0.50 µs | 2.1 µs | 10.2 µs |
+| **Dependencies** | Go runtime | C compiler | C compiler + libpatricia | None |
+| **IPv6** | Native | Native | Separate trie object | Native |
+| **Values** | Go generics | Any Perl scalar | Integers / closures | Any Perl scalar |
+| **Best for** | Go projects | Perl, max throughput | Existing Perl codebases | Portability |
 
 ## How It Works
 
